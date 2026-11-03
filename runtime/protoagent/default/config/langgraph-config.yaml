@@ -1,0 +1,637 @@
+# protoAgent — LangGraph runtime configuration
+#
+# The template ships with a single ``researcher`` subagent and no knowledge
+# store. Fork this file to match your agent's skills / subagents /
+# middleware needs. Anything referenced here must also have a matching
+# entry in ``graph/subagents/config.py`` (for subagents) or a tool
+# registered in ``tools/lg_tools.py``.
+
+# Model connections (ADR 0106) — the registry that replaces `model.provider`,
+# `model.api_base` and `model.api_key` (legacy compatibility fields; removal is deferred, #3128). One entry per
+# endpoint; a slot names a model within one of them — a bare alias routes to
+# `gateway`, and `<id>:<model>` picks a connection, so slots can mix a gateway with a
+# Claude / ChatGPT subscription. Manage them in Settings ▸ Model ▸ Connections.
+#
+# This is box-shared: set it on the Host and every agent on the box inherits it. An
+# agent entry is merged FIELD BY FIELD over the host entry with the same id, so an
+# agent-side `base_url: ""` REPLACES the box endpoint rather than deferring to it —
+# leave a field out to inherit it. A declared connection's key belongs in secrets.yaml
+# (`providers: {gateway: sk-...}`), which wins over an inline `api_key`; the Host file
+# cannot hand one out.
+#
+# Declared explicitly below (ADR 0106 / #3128): the template no longer leans on the
+# load-time migration that synthesises a `gateway` connection from the legacy
+# `model.api_base`/`model.api_key`. `base_url` here is exactly the App-default endpoint
+# that migration used, so a config with the legacy fields removed keeps resolving the
+# SAME gateway. The key is NOT carried in this file — put it in secrets.yaml under
+# `providers: {gateway: sk-...}` (an OPENAI_API_KEY env key is a migration-only
+# convenience; a declared connection reads its key only from its own fields/secrets).
+# On a fleet box, set the endpoint ONCE in the Host layer (host-config.yaml /
+# Settings ▸ Host) and DROP `base_url` here so this agent inherits it instead of
+# shadowing the box.
+providers:
+  - id: gateway
+    type: openai-compat
+    label: LiteLLM gateway
+    base_url: http://gateway:4000/v1
+  - id: stage1stub
+    type: openai-compat
+    label: Stage-1 verification stub (no live endpoint)
+    base_url: http://127.0.0.1:9/v1
+  - id: deepseek
+    type: openai-compat
+    label: DeepSeek（生产）
+    base_url: https://api.deepseek.com/v1
+  - id: zhipu
+    type: openai-compat
+    label: 智谱 GLM（故障降级用）
+    base_url: https://open.bigmodel.cn/api/paas/v4
+  # More connections an agent can reach — uncomment to add. A local runtime, or a
+  # native Claude / ChatGPT subscription (ADR 0097; no endpoint, no key):
+  # - id: local
+  #   type: openai-compat
+  #   base_url: http://127.0.0.1:8080/v1   # a local vLLM / Ollama / LM Studio
+  # - id: anthropic-oauth
+  #   type: anthropic-oauth                # Claude Pro/Max — no endpoint, no key
+  # - id: openai-codex
+  #   type: openai-codex                   # ChatGPT/Codex plan — no endpoint, no key
+
+model:
+  name: deepseek:deepseek-v4-flash
+  # `name` is HOST-scoped (ADR 0047) — a box-wide default set on the Host console
+  # (Settings ▸ Host ▸ Model & Routing) or in host-config.yaml, NOT here. Uncommenting
+  # it in this agent layer would shadow the host value (agent > host in the cascade),
+  # so a Host-console edit would appear to "reset". The App default (shown below)
+  # already applies; uncomment ONLY to pin a per-agent override.
+  #   name: protolabs/reasoning             # bare → the `gateway` connection; swapping
+  #                                         # the model is a gateway edit, not a fork
+  #                                         # code change
+  #   name: local:qwen3-32b                 # `<id>:<model>` picks a connection above
+  #
+  # Native OAuth subscriptions (ADR 0097) run Claude / ChatGPT on your OWN coding-agent
+  # plan, straight through the native pipeline (no gateway, no ACP). Declare the
+  # connection above, then name a real model id on it — NOT a gateway alias:
+  #   name: anthropic-oauth:claude-sonnet-4-5  # Claude Pro/Max. Reads Claude Code's own
+  #                                            # token (~/.claude/.credentials.json or
+  #                                            # CLAUDE_CODE_OAUTH_TOKEN).
+  #   name: openai-codex:gpt-5-codex           # ChatGPT/Codex plan (Responses API).
+  #                                            # Bootstraps from ~/.codex/auth.json, then
+  #                                            # owns its refresh. ToS gray area — opt-in.
+  #
+  # `provider`, `api_base` and `api_key` are legacy compatibility fields (#3128): the connections above
+  # are preferred, so this template sets none of them. Removal is deferred; some paths still
+  # read them directly — the unqualified default route, embeddings / transcription, the
+  # context-window probe, egress auto-allow and `--setup` validation — so a subscription
+  # PRIMARY still wants `provider: anthropic-oauth` (or `openai-codex`) beside its name.
+  temperature: 0.2
+  max_tokens: 8192  # DeepSeek 单次输出上限；推理模型会先消耗 reasoning_tokens，留足余量
+  max_iterations: 100  # 单轮工具循环硬上限（防无限重试烧 token；约 25 次工具调用）
+  # 单轮“完全无输出”超过该秒数即中止，避免卡死；0 关闭（下限 15s）
+  turn_stall_timeout_seconds: 240
+  # Native image input — set true when `name` is a vision model (protolabs/fast,
+  # protolabs/smart, protolabs/reasoning/deepseek-v4). Chat then sends attached
+  # images straight to the model instead of through the extraction pipeline.
+  vision: false
+  # Favorite models (#1957) — pinned go-to models the chat `/model` quick-switch
+  # offers (in this order) instead of the gateway's full list. Manage them in
+  # Settings ▸ Model ▸ Favorite models; empty/omitted = /model shows every model.
+  #   favorites:
+  #     - protolabs/fast
+  #     - protolabs/reasoning
+  request_timeout: 120   # per-call timeout (s) on the model client — bounds a hung/slow gateway
+  max_retries: 2         # transient-error retries inside the client
+  # Advanced sampling — all optional; omit to use the gateway / model-card
+  # defaults. top_p + presence_penalty are standard OpenAI params; top_k +
+  # repetition_penalty + chat_template_kwargs ride extra_body for vLLM-style
+  # gateways. Typical self-hosted Qwen card:
+  #   top_p: 0.95
+  #   top_k: 20
+  #   presence_penalty: 0.0
+  #   repetition_penalty: 1.05
+  #   chat_template_kwargs: { preserve_thinking: true }
+  # Reasoning controls for OpenAI-compatible reasoning models (DeepSeek, the
+  # OpenAI o-series). Both opt-in; omit to inherit the provider default.
+  # `thinking` rides extra_body (enabled|disabled); `reasoning_effort` is sent
+  # top-level (low|medium|high|max). NOTE: with thinking on, DeepSeek ignores
+  # temperature / top_p / penalties.
+  #   thinking: enabled
+  #   reasoning_effort: high
+
+subagents:
+  researcher:
+    enabled: true
+    tools:
+      - current_time
+      - web_search
+      - fetch_url
+      - memory_recall
+      - memory_list
+    max_turns: 40
+    # Per-subagent model override (blank = routing.aux_model, then the main model).
+    # Pin a heavy-reasoning subagent to the main model even when aux_model routes
+    # the rest to a cheaper alias, e.g.:  model: protolabs/reasoning
+    model: ""
+
+middleware:
+  # All four subsystems default ON. The template constructs the
+  # knowledge store + scheduler backends automatically (see
+  # ``server.py::_build_knowledge_store`` and ``_build_scheduler``).
+  # Flip any of these to ``false`` to opt out — the corresponding
+  # tools (memory_*, schedule_*) are dropped from the agent loop
+  # without touching the researcher subagent's tool allowlist.
+  knowledge: true
+  audit: true
+  memory: true
+  scheduler: true
+
+knowledge:
+  db_path: /sandbox/knowledge/agent.db
+  # Tier (ADR 0041 / bd-2wu): scoped (private, default) | shared (the whole store is the
+  # host-level commons) | layered (read commons ∪ private, write private, operator
+  # `python -m server`-promoted). The commons lives at `commons.path`/knowledge.db; a
+  # shared/layered fleet must share ONE embed_model (the commons is stamped + enforced).
+  # scope: scoped
+  # Semantic recall: hybrid FTS5 + vector search (RRF-fused) via embed_model.
+  # OFF by default (#1681) — keyword recall works against any gateway; turn this
+  # on once yours serves the embedding model below (check GET /v1/models). When
+  # on, a route outage degrades to keyword-only via the circuit breaker.
+  embeddings: false
+  # The embedding model your gateway serves (NOT the chat model). Default is the
+  # protoLabs gateway's; forks on another gateway set theirs (check GET /v1/models).
+  embed_model: qwen3-embedding
+  # Speech-to-text model for audio/video ingestion — the gateway's OpenAI-compatible
+  # /audio/transcriptions alias (e.g. whisper-1). Blank disables audio/video import.
+  # Video needs ffmpeg on the host to extract the audio track.
+  transcribe_model: whisper-1
+  # Extract durable facts from a conversation on retirement (aux model) and
+  # consolidate them into the store. Rides the harvest pass (ADR 0021).
+  facts: true
+  top_k: 5
+  # Namespace scope for the per-turn AUTO-INJECTED recall (ADR 0069 D3a). Unset =
+  # no filter (every chunk is eligible — box-commons sharing keeps working). When
+  # set, only chunks whose `namespace` matches a listed value auto-inject; include
+  # "" to also match un-namespaced chunks. memory_recall stays unscoped.
+  # inject_namespaces:
+  #   - "projects/alpha"
+  #   - ""
+  # Trust floor for the per-turn AUTO-INJECTED recall (ADR 0069 D8). Chunks rank
+  # into deterministic trust tiers by source_type: 3 = operator-authored, 2 =
+  # agent-derived (extracted facts, harvest, memory_ingest), 1 = ingested/external
+  # (web, YouTube, PDFs, media) and unknown. 1 (default) excludes nothing — low
+  # tiers are only ranked below higher ones; 2 drops external content from
+  # auto-injection; 3 = operator rows only. memory_recall is never gated.
+  # inject_min_trust: 1
+  # Hot-memory write confirm gate (ADR 0069 D8). When true, the agent's
+  # memory_ingest refuses domain="hot" writes (it must ask the operator);
+  # operator surfaces are unaffected. Every hot write emits a
+  # `memory.hot_written` bus event either way.
+  # hot_write_confirm: false
+  # Document chunking on ingest (ADR 0021) — large bodies (conversation
+  # summaries, pasted docs) are split into overlapping passages BEFORE
+  # embedding, so each passage gets its own vector instead of one diluted
+  # whole-doc embedding. Content under chunk_max_chars (facts/notes) isn't
+  # split. Defaults shown; omit to use them.
+  # chunk_max_chars: 1200      # target ceiling per chunk
+  # chunk_overlap_chars: 150   # shared tail between adjacent chunks (boundary safety)
+  # chunk_min_chars: 200       # fold a trailing fragment below this into the prior chunk
+  # Contextual Retrieval (ADR 0021, Anthropic) — when a doc splits, prepend a
+  # one-line aux-LLM context situating each chunk in the whole document before
+  # embedding/indexing. Lifts both semantic + keyword recall. Costs one aux call
+  # per chunk at INGEST (not on the query path), so off by default.
+  # contextual_enrichment: false
+  # context_max_doc_chars: 12000   # cap the document text sent in the context prompt
+
+# Session memory — the <prior_sessions> digest KnowledgeMiddleware injects each
+# turn, one attributed line per past session (~30 tokens each). Both keys are
+# CEILINGS on that block; to remove the digest entirely use
+# `context.prior_sessions: off` below.
+#
+# The digest's location is NOT configured here: summaries live in the instance
+# store (`~/.protoagent/<instance>/memory`), overridable only with the
+# MEMORY_PATH env var. The old `path:` key was read by nothing — it pointed at a
+# container-era `/sandbox/memory/` that is unwritable on an ordinary host, which
+# is why the path moved to the instance store in the first place (#3308).
+memory:
+  max_sessions: 10   # how many past sessions the digest may list
+  max_tokens: 2000   # char/4 ceiling for the rendered block; entries shed from the end
+
+# Projected context — everything injected per turn on top of the stable prompt
+# (working state, always-on memory, the skill index, the prior-session digest,
+# recalled knowledge) — is bounded to this share of the model's context window
+# (ADR 0108 D6). Over budget, the lowest-priority parts shed first: recalled
+# knowledge, then the prior-session digest, then skill descriptions (names never
+# drop); working state and always-on memory are never shed. Never below 16k chars
+# (room for always-on memory + the digest) — on a 32k window or smaller that floor
+# applies. 8% of a 128k window is ~10k tokens — more than a typical turn injects,
+# so the default sheds nothing there; lower it to make the budget bite. 0 =
+# unbounded (also unbounded when the gateway reports no window for the model).
+context:
+  budget_pct: 8
+  # Prior-session digest policy (ADR 0108 D9): newest (default) | relevant
+  # (only sessions matching the turn's query, via session-search FTS; falls
+  # back to newest) | off (no automatic digest — session_search/recall_session
+  # stay the on-demand path). The active session's own summary is never
+  # injected as a "prior" session, whatever the policy.
+  # `off` may be written bare or quoted — both mean the policy (#3253).
+  prior_sessions: newest
+
+# Skill index — SQLite FTS5 store for learned skill-v1 artifacts.
+# Skills (emitted by task() or authored as SKILL.md) are indexed here and listed
+# in the system prompt as an always-on <available_skills> index (name + summary);
+# the agent loads any one's full procedure on demand via load_skill (progressive
+# disclosure, ADR 0060).
+skills:
+  db_path: /sandbox/skills.db
+  # Cap full descriptions in the per-turn index; every discoverable name/slash
+  # remains listed. This example explicitly uses 5; omitting the key falls back
+  # to 24. Full bodies load on demand via load_skill.
+  top_k: 5
+  # Tier (ADR 0041 slice 3): scope = scoped (private) | shared (one commons for all)
+  # | layered (read commons ∪ private, write private, promote to commons). Blank →
+  # derived from `shared` below. `python -m server skills promote <name>` lifts a
+  # private skill into the commons.
+  # scope: scoped
+  # Tiered stores (ADR 0041). `shared: true` lifts the skills library into the
+  # COMMONS — one DB read/written by every agent on this host (a fleet's compounding
+  # skill library) — instead of per-instance scope. Default false = private per
+  # instance. Pairs with multiple agents isolated via `instance.id`.
+  shared: false
+
+# Shared commons (ADR 0041) — base dir for `shared` stores; blank → ~/.protoagent/commons.
+# commons:
+#   path: ""
+
+# A2A card identity (#570) — declare your fork's advertised skills + card
+# description HERE (or contribute skills from a plugin via register_a2a_skill)
+# rather than editing server/a2a.py. Omit both and the template ships one
+# free-text "chat" placeholder so a fresh clone stays callable. The card `name`
+# already follows identity.name / AGENT_NAME.
+a2a:
+  # Deploy-time guard: refuse to start if the card would advertise a loopback URL
+  # (e.g. A2A_PUBLIC_URL unset on a deployed agent → http://127.0.0.1:.../a2a,
+  # unreachable to remote consumers). Leave off for local/desktop runs (loopback
+  # is correct same-host); turn ON for any agent other agents dial over the network.
+  # require_routable_url: true
+  # description: "Acme Bot — turns support tickets into triaged, drafted replies."
+  # skills:
+  #   - id: triage_ticket
+  #     name: Triage Ticket
+  #     description: Classify a support ticket and draft a reply.
+  #     tags: [support]
+  #     examples: ["triage ticket #1234"]
+  #     # Structured output (optional): the executor enforces the schema (#476)
+  #     # and emits a typed DataPart advertised in the card's output_modes.
+  #     # result_mime: application/vnd.protolabs.triage-v1+json
+  #     # output_schema: { type: object, properties: { ... }, required: [ ... ] }
+
+# Outbound A2A SSRF guard (#572) — opt-in CIDR allowlist for the destinations
+# the agent POSTs to: push-notification callbacks (caller-supplied) + delegate_to
+# a2a delegates. Empty/unset = today's behavior (callbacks keep their
+# default private-IP denylist; delegate_to is unrestricted). When set, a
+# destination is allowed only if every resolved IP falls inside a listed CIDR —
+# e.g. lock outbound to your tailnet / private fleet network.
+security:
+  # callback_allowlist:
+  #   - 100.64.0.0/10   # tailnet
+  #   - 10.0.0.0/8      # private fleet
+
+# Workflows — reusable declarative multi-step subagent recipes (ADR 0002),
+# run via the run_workflow tool. Bundled examples ship in the repo workflows/
+# dir; `dir` is the writable root for user/agent-emitted recipes (same
+# /sandbox→~/.protoagent fallback as the stores).
+workflows:
+  enabled: true
+  dir: /sandbox/workflows
+
+# Context compaction — summarize old history near the context limit so long
+# sessions don't overflow the window. ON by default.
+#   trigger: "fraction:0.8" | "tokens:120000" | "messages:80"
+#   max_tokens: absolute ceiling OR-ed with the trigger — compaction fires at
+#     min(fraction × window, max_tokens). 0 = no ceiling.
+# NOTE: "fraction:" needs the model's context window (gateway, then the model's
+# langchain profile, then a conservative family window). When none is known the
+# max_tokens ceiling alone applies (or a message count, logged, when it is 0).
+#   model: a cheaper/faster alias to summarize with (blank = main model).
+compaction:
+  enabled: true
+  trigger: "fraction:0.8"
+  max_tokens: 200000
+  keep_messages: 20
+  # model: protolabs/fast
+
+# Conversation checkpointer — persists each chat session's history per
+# thread_id so multi-turn chats survive a server restart. Same
+# /sandbox→~/.protoagent writable fallback as the stores. Blank = in-memory
+# (history cleared on restart).
+checkpoint:
+  db_path: /sandbox/checkpoints.db
+  # Pruning keeps the DB bounded: keep the latest N checkpoints per session,
+  # and drop whole sessions idle past max_age_days. Swept every
+  # prune_interval_hours (0 disables the sweep).
+  keep_per_thread: 5
+  max_age_days: 30
+  prune_interval_hours: 6
+  # When a session is retired (aged out or deleted), summarize it into the
+  # knowledge base (searchable via memory_recall) before dropping the raw
+  # checkpoints. Needs the knowledge middleware enabled.
+  harvest_enabled: true
+  # A history DB created before incremental vacuum never gives freed space back to
+  # the disk. The first start after upgrading migrates it once (a few seconds per
+  # bloated DB) when it's worth it and the disk has room. false = leave it alone.
+  # vacuum_legacy_on_start: true
+  # Write-path growth bounds (ADR 0120): apply keep_per_thread after every checkpoint
+  # write, and store large images in messages once per session instead of in every
+  # checkpoint. Alerts banner the console when the DB (or one session) passes a size.
+  # prune_on_write: true
+  # offload_media: true
+  # alert_db_mb: 5120        # 0 = no alert
+  # alert_thread_mb: 1024    # 0 = no alert
+
+# Media output store (#1929) — binary artifacts (images/audio/video) plugin
+# tools persist via registry.save_media() and the core /media/<file> route
+# serves. Gated by default: each saved URL carries a per-file HMAC signature so
+# inline chat images render even under a bearer gate, while unsigned requests
+# are denied. Both knobs are optional:
+#   public: true opts the WHOLE store out of the auth gate (explicit exposure).
+#   retention_days prunes files older than N days on each save (0 = keep forever).
+#   remote_link_ttl_s is how long a file link handed to an A2A peer / a /v1 client
+#     stays valid (default 604800 = 7 days; 0 = never expire). Console links never expire.
+# media:
+#   public: false
+#   retention_days: 0
+#   remote_link_ttl_s: 604800
+
+# Langfuse deep tracing (ADR 0006's other half, #3017) — the per-turn trace TREE
+# (tool calls, model calls, subagent spans) behind the telemetry row's trace_id, and
+# what makes a2a.trace propagation pay off (a delegation nests under its caller).
+# Resolution is env > config: a container deploy exporting LANGFUSE_PUBLIC_KEY /
+# LANGFUSE_SECRET_KEY / LANGFUSE_HOST keeps working untouched and those vars WIN.
+# This block is the fallback — and the only path that reaches a desktop-launched
+# fleet member, which is spawned with no LANGFUSE_* in its environment. The two keys
+# are SECRETS: set them in Settings ▸ Tracing and they land in secrets.yaml, never
+# here. Needs a restart (the client is built once at boot).
+# The host below applies to the keys below it: credentials that came from
+# LANGFUSE_{PUBLIC,SECRET}_KEY go to LANGFUSE_HOST and never here, so config can't
+# redirect a deployment's keys (#3039). The reverse is a FALLBACK, not a block — keys
+# here with the host blank still use LANGFUSE_HOST, which is how host-in-env +
+# keys-in-Settings works and how a fleet member inherits the hub's Langfuse.
+# tracing:
+#   enabled: true
+#   host: https://cloud.langfuse.com   # blank → LANGFUSE_HOST, else http://host.docker.internal:3001 (compose only)
+
+# Background jobs (ADR 0050/0070) — delegations fired with run_in_background.
+# auto_resume: when a job finishes, immediately run a turn in the session that
+# spawned it so the agent reviews the report and briefs the operator; false
+# restores pull-only delivery (the report drains on that session's next turn).
+background:
+  auto_resume: true
+
+# Model routing / failover.
+#   aux_model: ONE cheap/fast alias for the non-reasoning calls — context
+#     summarization, goal verification, and subagent delegation all fall back
+#     to it unless they set a specific override. Blank = main model everywhere.
+#     Can also be an `acp:<agent>` (e.g. acp:claude) to route those aux calls
+#     through a coding agent instead of a gateway model — same for goal.eval_model
+#     and compaction.model. (The main brain itself is selected via agent_runtime.)
+#   fallback_models: on a primary error, retry on each in order. Empty = none.
+# routing.aux_model / routing.fallback_models are HOST-scoped (ADR 0047) — set on
+# the Host console (Settings ▸ Host ▸ Model & Routing) or host-config.yaml, NOT here
+# (an agent-layer copy would shadow the host value). App default = none on both.
+# routing:
+#   aux_model: protolabs/fast
+#   fallback_models:
+#    - claude-haiku-4-5
+
+# 主模型报错（如 DeepSeek 503）时按顺序重试这些模型。
+routing:
+  fallback_models:
+    - zhipu:glm-4-flash
+
+# ACP runtime adapters (ADR 0033) — only relevant when `agent_runtime: acp:<agent>` (or
+# an `acp:<agent>` aux/eval/compaction model) routes a turn through a coding agent. Each
+# agent has a built-in default launch command (an `npx -y …` fetch); override it here to
+# point at a locally-installed binary (faster cold-start, no network). `args` optional.
+# acp:
+#   agents:
+#     claude: { command: claude-agent-acp, args: [] }   # use the installed adapter, not npx
+#     codex:  { command: codex-acp,        args: [] }
+
+# Goal mode — route the goal verifier to a cheaper model with `eval_model`
+# (else it uses routing.aux_model, else the main model).
+goal:
+  # eval_model: protolabs/fast
+  max_iterations: 8
+
+# Watches (ADR 0067) — agent-held supervised conditions (a deploy, CI, a metric),
+# polled out-of-band; when one trips the agent is resumed to react. `enabled` (ON by
+# default) BINDS the agent-facing create_watch / list_watches / clear_watch tools —
+# independent of goal mode. Tool-availability ONLY: turning it off never deletes or
+# mutates a stored watch, and the background poller runs regardless, so a watch created
+# by an operator (POST /api/watches) or a plugin keeps being polled either way.
+# `interval` is the global poll cadence in seconds (min 5); a watch's own `interval_s`
+# overrides it as a floor. `keep_terminal_h` is how long a met/expired watch stays listed
+# before the tick deletes it (0 = keep forever).
+watches:
+  enabled: true
+  # interval: 30
+  # keep_terminal_h: 24
+
+# The room (#3042) — `@name` in chat addresses a delegate directly and its reply lands
+# in the transcript under its own name. The checkpointer thread IS the room, so an
+# addressed participant is caught up on "the room since you last spoke" instead of the
+# whole history. These are that room's bounds; see docs/guides/rooms.
+room:
+  # The catch-up window handed to an addressed participant. Whichever cap trips first
+  # wins, and the window is taken from the newest end. When it truncates, the operator
+  # is told so — the alternative (silently dropping the tail) leaves re-mentioning as
+  # the only workaround, which fragments the conversation.
+  catchup_max_messages: 40
+  catchup_max_chars: 8000
+  # Serial round-robin rounds one address may take. 3 (the default) lets the addressed
+  # set answer each other: it re-runs in the same order so each participant sees what
+  # the others just said. A round where everyone passes settles the room early, and this
+  # cap is the backstop — which means a cast with nothing more to say still costs ONE
+  # EXTRA round to discover that, on every multi-addressee address. Set 1 for a single
+  # pass (each addressee answers you once and never each other). A lone addressee runs
+  # one round however high this is set.
+  max_rounds: 3
+
+# Persona — the agent's own SOUL.md. `self_edit_enabled` (OFF by default) gives the
+# LEAD agent the `edit_soul` tool so it can rewrite SECTIONS of its own persona
+# (identity/voice ONLY, never operating doctrine — ADR 0079/0081). Every edit is
+# snapshotted to soul-history (#1691, restorable from Settings ▸ Identity) and takes
+# effect on the next turn. Guarded self-modification — enable deliberately.
+soul:
+  self_edit_enabled: false
+
+# Opportunistic self-improvement after a completed goal or tracked task (#3069). The master
+# switch is OFF by default. `propose` creates review tasks; `auto` may write the
+# corresponding artifact directly (with provenance and rollback history). Automatic
+# skill writes are refused for a flat shared store; use scoped/layered or propose. Reviews
+# require middleware.scheduler; runtime status warns if that prerequisite is unavailable.
+self_improvement:
+  enabled: false
+  soul_md: auto             # off | propose | auto
+  skills: propose           # off | propose | auto
+  distillation: propose     # off | propose | auto
+
+# Programmatic tool calling — let the model write ONE Python script that
+# composes several tools in a single turn (collapses long tool-call chains).
+# SECURITY: runs model-authored code in a subprocess (scrubbed env + hard
+# timeout). OFF by default — only enable for trusted models or inside a
+# hardened container. `tools: []` exposes all tools except execute_code itself.
+execute_code:
+  enabled: true
+  timeout: 30
+  tools: []
+
+# 沙箱工具插件（sandboxed read/write/exec）。domain 指向本机 SSH 隧道入口，
+# 隧道目标为云服务器上的 opensandbox-server（127.0.0.1:8080）。
+# server_proxy 必须为 true：隧道只转发服务 API 端口，沙箱映射端口不可达。
+sbx_tools:
+  domain: localhost:18090
+  image: docgen-base:2
+  workdir: /workspace
+  # 0 = 不按空闲回收，容器按 lifetime_min 自然到期；保持沙箱常驻避免反复创建。
+  idle_timeout_s: 0
+  lifetime_min: 120
+  # 插件注册阶段没有事件循环，无法在启动时建沙箱；首次调用建好后常驻复用。
+  ready_timeout_s: 60
+  command_timeout_s: 120
+  server_proxy: true
+  request_timeout_s: 240
+locale:
+  english: false
+
+plugins:
+  enabled:
+    - execute_code
+  disabled: []
+
+# Tools — fork customization without editing tools/lg_tools.py.
+#   disabled: drop named core tools from the agent (a fork "keeps what it wants"
+#     by listing the rest here; plugins still ADD tools). Live-reloadable.
+#   hidden:   a HARD superset of disabled — denied like disabled AND dropped from the
+#     console entirely, so the tool never renders and can't be re-enabled from the UI
+#     (a setup-time / restricted-console control; ADR 0071). disabled = off-but-visible.
+#   deferred: withhold tool schemas until the agent searches for them (cuts the
+#     per-turn footprint past ~15 tools). OFF by default.
+#   fleet_diagnostics.enabled: expose the future fleet-diagnostics tool to the
+#     model. OFF by default; no tool is bound unless a later slice supplies it.
+tools:
+  disabled:
+    - list_projects
+    - list_dir
+    - read_file
+    - write_file
+    - edit_file
+    - delete_file
+    - find_files
+    - search_files
+    - run_command
+    - execute_code
+    - onboard_project
+    - register_local_project
+  hidden: []
+  fleet_diagnostics:
+    enabled: false
+  # - calculator
+  # - web_search
+  # deferred:
+  #   enabled: false
+  #   keep: []
+
+# React operator console — the tasks/notes APIs accept a project path from
+# the (free-text) UI, so the server, not the client, decides which
+# directories they may touch. The protoAgent repo root is always allowed;
+# add any other project roots you operate on here. Empty = repo root only.
+# Editable in-app from the setup wizard's Workspace step.
+operator:
+  allowed_dirs: []
+  # - /home/kj/projects/my-other-repo
+
+# Managed projects (ADR 0095) — the ONE place a project is declared. Each entry is a
+# project's binding on THIS host: where it lives, what it is on GitHub, what the agent
+# may do to it. Consumers project from it instead of re-declaring — the filesystem fence
+# (ADR 0007), the github plugin's repo picker, the board's repo/base branch. An explicit
+# `filesystem.projects` (or `github.repos`, or `project_board.repo`) still wins, so
+# existing config is untouched by this.
+#
+# A registered project is fenced READ-WRITE by default; opt out per entry.
+# projects:
+#   - name: protoAgent                  # the identifier the fs tools address it by
+#     path: /home/kj/dev/protoAgent
+#     github: protoLabsAI/protoAgent    # feeds the github repo picker
+#     default_branch: main              # feeds the board's worktrees/PRs
+#   - name: notes
+#     path: /home/kj/dev/notes
+#     write: false                      # read-only
+#   - name: someone-elses-repo
+#     path: /home/kj/dev/theirs
+#     github: them/theirs
+#     fs: false                         # tracked for github/board only — no fs reach
+
+# Project onboarding (#2555) — how a repo BECOMES one of the managed projects above,
+# without an operator hand-editing this file and restarting.
+#
+# `enabled` surfaces the tools and the fields below; it is not the consent. The consent
+# is `root` and `allow`, and both are empty here, so out of the box this onboards
+# NOTHING: no source matches an empty allowlist, and there is no space to clone into.
+# Fill them in and the agent can clone + register within exactly that space — a `../`
+# or a symlink that would escape the root is refused before anything is written. A local
+# folder outside the root (or any, while it is unset) is registered only if you approve
+# it on an in-chat card (`approve_outside_root` below).
+onboarding:
+  enabled: true
+  root: ""                              # e.g. /home/kj/dev — clones land here, and every
+                                        # registration must resolve UNDER it
+  allow: []                             # e.g. [github.com/protoLabsAI/*] — clone-source globs,
+                                        # same semantics as plugins.sources.allow. Empty allows nothing
+  write_default: false                  # onboarded projects are read-only unless a call asks for write
+  approve_outside_root: true            # a local folder OUTSIDE root (or any, with no root) → an
+                                        # approval card for that one folder; false = refuse
+
+# Box runtime (Host layer, ADR 0047 D8) — box-wide knobs every agent this machine
+# owns inherits. These are HOST defaults: best set once in host-config.yaml or the
+# Settings ▸ Host / App home (a per-agent value here is a silent no-op — the host
+# process reads its own config). Resolution is file > env > default, so the
+# PROTOAGENT_HOST / PROTOAGENT_FLEET_MAX_WARM / PROTOAGENT_FLEET_WARM_GRACE env vars
+# stay the fallback for env-configured boxes.
+network:
+  bind: 127.0.0.1           # 0.0.0.0 = all interfaces (token-gate A2A first); --host still wins
+fleet:
+  port_base: 7870           # fleet workspace agents get port_base+1, +2, …
+  discovery:
+    port_min: 7860          # LAN/tailnet discovery scan window (inclusive)
+    port_max: 7910
+    mdns: false             # opt-in (#1802): advertise + browse _protoagent._tcp on the LAN. Off = stay quiet on the network
+  warm:
+    max: 0                  # warm-agent cap (0 = unlimited)
+    grace_seconds: 300      # spare agents touched within N s from LRU eviction (0 = pure LRU) —
+                            # the hub refreshes recency on member turn starts, so the default
+                            # 5min window protects a mid-turn agent from a rapid A→B→A switch
+  # autostart: [cindi, matt]  # member ids/names the hub (re)starts on boot (survives container
+                              # recreate). Left out = PROTOAGENT_FLEET_AUTOSTART (comma-separated);
+                              # an explicit [] means none, so don't set it to [] to "default" it.
+
+# External secrets manager (ADR 0080) — pull secrets from Infisical at boot, on
+# config reload, and on a refresh interval, and export them as ENV VARS. Values fill
+# the documented env fallback tier (OPENAI_API_KEY, A2A_AUTH_TOKEN, plugin
+# requires_env, …): an env var you set yourself still wins (unless override_env),
+# and secrets.yaml still beats everything. Bootstrap credentials — the machine
+# identity — are the ONE pair that stays local: set INFISICAL_CLIENT_ID /
+# INFISICAL_CLIENT_SECRET in the environment, or put client_id / client_secret
+# under `secrets_manager:` in secrets.yaml (the Settings UI stores them there).
+# Editable in-app: Settings ▸ Secrets manager (incl. connection test + sync-now).
+# secrets_manager:
+#   enabled: true
+#   provider: infisical
+#   host: https://us.infisical.com   # or https://eu.infisical.com / your self-hosted URL
+#   project_id: ""
+#   environment: prod                # the dev sandbox instance can point at `dev`
+#   path: /
+#   recursive: true                  # include subfolders under `path`
+#   refresh_seconds: 300             # re-pull cadence; 0 = boot/config-reload only
+#   required: false                  # true = refuse to boot when the manager is unreachable
+#   override_env: false              # true = manager values beat pre-existing env vars
+#   timeout_seconds: 10

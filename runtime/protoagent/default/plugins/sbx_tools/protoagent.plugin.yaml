@@ -1,0 +1,43 @@
+id: sbx_tools
+name: Sandbox Tools (OpenSandbox)
+version: 0.0.0
+description: >-
+  Stage-2 isolation layer. Replaces the host file/exec tools with equivalents
+  that operate inside an OpenSandbox container (sbx_read_file, sbx_write_file,
+  sbx_run_command, sbx_execute_code, ...). All native file/exec tools are listed
+  in tools.disabled; skills call only the sbx_* names.
+enabled: true
+config_section: sbx_tools
+config:
+  domain: localhost:8090
+  image: docgen-base:2
+  workdir: /workspace
+  idle_timeout_s: 0
+  ready_timeout_s: 60
+  lifetime_min: 120
+  command_timeout_s: 120
+  max_output_chars: 20000
+  auto_tunnel: true
+  ssh_target: root@47.101.71.56
+  ssh_remote_host: 127.0.0.1
+  ssh_remote_port: 8080
+  tunnel_wait_s: 15
+  failure_threshold: 3
+  circuit_cooldown_s: 60
+secrets: [api_key]
+settings:
+  - { key: domain, label: "OpenSandbox server (host:port)", type: string }
+  - { key: image, label: "Sandbox image", type: string }
+  - { key: workdir, label: "Sandbox work directory", type: string }
+  - { key: api_key, label: "OpenSandbox API key", type: secret }
+  - { key: idle_timeout_s, label: "Idle timeout before recycle (s, 0 = never)", type: number }
+  - { key: lifetime_min, label: "Sandbox lifetime (min)", type: number }
+  - { key: command_timeout_s, label: "Default command timeout (s)", type: number }
+  - { key: auto_tunnel, label: "Reopen the SSH tunnel automatically when it drops", type: boolean }
+  - { key: ssh_target, label: "SSH target for the tunnel (user@host)", type: string }
+  - { key: ssh_remote_port, label: "OpenSandbox port on the remote host", type: number }
+  - { key: failure_threshold, label: "Consecutive failures before the circuit opens", type: number }
+  - { key: circuit_cooldown_s, label: "Circuit breaker cooldown (s)", type: number }
+capabilities:
+  network: []
+  filesystem: none

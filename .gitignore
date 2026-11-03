@@ -1,0 +1,60 @@
+# ============================================================
+# 密钥与凭据：一律不入库
+# ============================================================
+**/secrets.yaml
+**/secrets.yml
+**/secrets.json
+!**/secrets.example.yaml
+.env
+.env.*
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# ============================================================
+# 运行时状态（数据库 / 记忆 / 媒体 / 日志）
+# ============================================================
+runtime/protoagent/.instances/
+runtime/protoagent/default/*.db
+runtime/protoagent/default/*.db-shm
+runtime/protoagent/default/*.db-wal
+runtime/protoagent/default/.instance-uid
+runtime/protoagent/default/.instance-uid.lock
+runtime/protoagent/default/config/.setup-complete
+runtime/protoagent/default/config/.max-iterations-50-migrated
+runtime/protoagent/default/activity/
+runtime/protoagent/default/artifact/
+runtime/protoagent/default/audit/
+runtime/protoagent/default/background/
+runtime/protoagent/default/friction/
+runtime/protoagent/default/goals/
+runtime/protoagent/default/inbox/
+runtime/protoagent/default/knowledge/
+runtime/protoagent/default/media/
+runtime/protoagent/default/memory/
+runtime/protoagent/default/notes/
+runtime/protoagent/default/scheduler/
+runtime/protoagent/default/tasks/
+runtime/protoagent/default/trajectory/
+runtime/protoagent/default/watches/
+runtime/protoagent/default/workspace/
+runtime/protoagent/default/workspaces/
+runtime/protoagent/default/sbx_tools/
+
+# ============================================================
+# 生成产物 / 临时文件 / 日志
+# ============================================================
+out/
+runtime/stage3-out/
+runtime/stage5-out/
+runtime/tmp-*
+*.log
+
+# ============================================================
+# 本地环境
+# ============================================================
+.venv/
+__pycache__/
+*.pyc
+.screenshots/

@@ -1,0 +1,30 @@
+id: vision_bridge
+name: Vision Bridge (拍照问答)
+version: 0.0.0
+description: >-
+  Stage-5 multimodal bridge. vision_analyze routes a host image / URL to an
+  OpenAI-compatible vision endpoint (default Zhipu GLM-4V) and returns text, so
+  text-only skills (拍照问答 / 简历分析 / 代码审查) can consume picture content
+  without native multimodal input in the chat model.
+enabled: true
+config_section: vision_bridge
+config:
+  base_url: https://open.bigmodel.cn/api/paas/v4
+  model: glm-4v-flash
+  max_tokens: 1024
+  timeout_s: 90
+  max_image_mb: 12
+  max_output_chars: 8000
+  media_dir: ""
+  api_key: ""
+secrets: [api_key]
+settings:
+  - { key: base_url, label: "Vision endpoint (OpenAI-compatible base URL)", type: string }
+  - { key: model, label: "Vision model", type: string }
+  - { key: max_image_mb, label: "Max image size (MB)", type: number }
+  - { key: timeout_s, label: "Request timeout (s)", type: number }
+  - { key: media_dir, label: "protoAgent media dir (empty = <box>/<instance>/media)", type: string }
+  - { key: api_key, label: "Vision endpoint API key", type: secret }
+capabilities:
+  network: [open.bigmodel.cn]
+  filesystem: read

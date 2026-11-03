@@ -1,0 +1,1 @@
+{"title": "模板自检：docx", "subtitle": "三步流程 · 一次生成", "author": "xyz_agent", "sections": [{"heading": "一、目标", "paragraphs": ["用固定脚本替代模型手写排版代码。", "参数只描述内容，不描述版式。"], "bullets": ["一次生成", "一次校验", "一次取回"], "table": {"columns": ["项", "说明"], "rows": [["输入", "spec.json"], ["输出", "docx"]]}}, {"heading": "二、结论", "paragraphs": ["版式由脚本负责，内容由模型负责。"]}]}

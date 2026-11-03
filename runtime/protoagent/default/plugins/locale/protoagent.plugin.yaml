@@ -1,0 +1,17 @@
+id: locale
+name: Reply Language
+version: 0.0.0
+description: >-
+  Front-end selectable reply language (Chinese / English). The toggle in
+  Settings drives a per-turn system directive, so the agent's user-facing
+  answers follow the chosen language while code, commands and paths stay
+  untouched.
+enabled: true
+config_section: locale
+config:
+  english: false
+settings:
+  - { key: english, label: "用英文回复（Reply in English）", type: bool, description: "打开 = 所有面向用户的回复用英文；关闭 = 一律用简体中文。代码、命令、路径、专有名词保持原样。" }
+capabilities:
+  network: []
+  filesystem: none

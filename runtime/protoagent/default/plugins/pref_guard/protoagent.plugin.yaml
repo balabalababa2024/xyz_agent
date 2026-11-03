@@ -1,0 +1,29 @@
+id: pref_guard
+name: Preference Guard (deterministic hot memory)
+version: 0.0.1
+description: >-
+  Plan-B deterministic memory classifier. Before every model call it scans the
+  latest user message with fixed rules; stable preferences ("以后都…", "我习惯…",
+  "别再…") are written into the knowledge store as always-on memory
+  (domain=hot, memory_kind=profile, delivery_policy=always) and therefore are
+  re-injected every turn and never shed for budget. One-off statements and
+  questions are ignored. Content-based dedupe prevents repeats. No core edits —
+  middleware only.
+enabled: true
+config_section: pref_guard
+config:
+  enabled: true
+  dry_run: false
+  max_chars: 300
+  dedupe: true
+  extra_triggers: ""
+secrets: []
+settings:
+  - { key: enabled, label: "自动记录偏好（Capture preferences automatically）", type: bool }
+  - { key: dry_run, label: "只记录日志不写库（Dry run）", type: bool }
+  - { key: dedupe, label: "按内容去重（Dedupe by content）", type: bool }
+  - { key: max_chars, label: "单条偏好最大字符数（Max chars per preference）", type: number }
+  - { key: extra_triggers, label: "额外触发词，正则管道分隔（Extra triggers, regex alternation）", type: string }
+capabilities:
+  network: []
+  filesystem: none

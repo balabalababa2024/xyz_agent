@@ -1,0 +1,4 @@
+model:
+  name: deepseek:deepseek-v4-flash
+  provider: openai
+  api_base: https://api.deepseek.com/v1
