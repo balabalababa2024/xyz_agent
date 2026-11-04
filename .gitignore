@@ -42,6 +42,12 @@ runtime/protoagent/default/workspace/
 runtime/protoagent/default/workspaces/
 runtime/protoagent/default/sbx_tools/
 
+# 多助理绑定库 / 提醒器落盘记录（本地状态，不入库）
+runtime/data/*.db
+runtime/data/*.db-shm
+runtime/data/*.db-wal
+runtime/data/notifications.jsonl
+
 # ============================================================
 # 生成产物 / 临时文件 / 日志
 # ============================================================

@@ -8,6 +8,9 @@
 - **隔离执行**：读写文件、跑命令、执行代码全部走 OpenSandbox 沙箱（原生 `run_command` / `write_file` 等已禁用）。
 - **文档生成**：Word / Excel / PPT / PDF / HTML，固定模板脚本一次成型，成品自动登记到 Artifact。
 - **图片问答**：聊天贴图或给路径/URL，由视觉模型转文字后作答。
+- **多助理**：`/assistant` 切换私人助理（健身教练、工作秘书…），各自有独立人设与私有记忆，互不可见。
+- **拍照记饮食**：识别图中食物与克重，热量由本地字典计算（视觉模型不算热量），按天记入事实记忆。
+- **定时提醒**：`runtime/scheduler.py` 每小时轮询 `events` 表，提前 N 天经 `/api/chat` 推送提醒。
 - **长期记忆**：稳定偏好自动写入热记忆并每轮注入；决策/事实按需检索；一次性报错不落库。
 - **故障降级**：主模型报错时自动切备用模型。
 
@@ -17,7 +20,7 @@
 |---|---|
 | 接入 | React 控制台 + HTTP API（`/api/chat`、`/api/tools`、`/healthz`） |
 | 运行时 | protoAgent 0.219.0 + LangGraph Agent + SQLite 持久化 |
-| 插件 | `sbx_tools`（沙箱工具）、`vision_bridge`（视觉）、`pref_guard`（偏好守卫）、`locale`（语言） |
+| 插件 | `assistant`（多助理隔离）、`sbx_tools`（沙箱工具）、`vision_bridge`（视觉 / 饮食热量）、`pref_guard`（偏好守卫）、`locale`（语言） |
 | 执行 | 远程 OpenSandbox Server（Docker），本机经 SSH 隧道访问 |
 | 模型 | DeepSeek（主）、智谱 GLM（降级 / 视觉） |
 
@@ -25,10 +28,13 @@
 
 ```text
 docs/version-log.md                 版本与变更记录
+data/food_calories.json             食物热量字典（每 100g，可自行扩充）
 runtime/
   sandbox.toml                      OpenSandbox Server 配置示例
   tunnel-up.ps1                     SSH 隧道守护脚本（需改目标地址）
+  scheduler.py                      轻量提醒调度器（单线程轮询 events 表）
   templates/docgen/                 文档模板脚本 + 镜像 Dockerfile
+  data/                             助理绑定库（运行时生成，不入库）
   protoagent/
     host-config.yaml                模型默认值
     default/
@@ -36,8 +42,9 @@ runtime/
         SOUL.md                     人格与记忆规则
         langgraph-config.yaml       运行时配置（模型/插件/沙箱/技能）
         secrets.example.yaml        密钥模板（复制为 secrets.yaml）
-      plugins/                      sbx_tools / vision_bridge / pref_guard / locale
-      skills/                       doc-gen / photo-qa / preference-notes / sandbox-code-review
+        personas/                   各助理人设（<id>.md）
+      plugins/                      assistant / sbx_tools / vision_bridge / pref_guard / locale
+      skills/                       doc-gen / photo-qa / diet-tracker / preference-notes / sandbox-code-review
 ```
 
 运行时状态（`*.db`、`memory/`、`media/`、`artifact/`、日志）不入库，首次启动自动创建。
@@ -104,6 +111,53 @@ curl http://127.0.0.1:7870/healthz
 ```
 
 首次启动会进入设置向导（仓库不包含 `.setup-complete`）；若未出现，直接到 **设置** 里补全模型与密钥。
+
+## 多助理与生活助手
+
+### 切换助理（人设 + 私有记忆隔离）
+
+在控制台输入框直接发命令（仅用户可发，模型无法调用）：
+
+| 命令 | 作用 |
+|---|---|
+| `/assistant` | 列出可用助理与当前绑定 |
+| `/assistant fitness_coach` | 把当前会话切到该助理 |
+| `/assistant new trainer 私人教练` | 新建 `config/personas/trainer.md` 并注册 |
+| `/assistant off` | 解除绑定，回到全局助理 |
+
+- 每个助理一个人设文件 `config/personas/<id>.md`，可自由改写；每轮对话都会追加到 system prompt。
+- 已绑定会话里的偏好与事实写入 `namespace=<id>` 且 `delivery_policy=on_demand`，只在当前助理的 prompt 中注入，**不会进入全局热记忆，也不会被其他助理看到**。
+- 未绑定会话保持原有全局行为（偏好写 `hot/always`），不受影响。
+- 绑定关系存 `runtime/data/assistants.db`（运行时生成，不入库）。
+
+### 拍照记饮食
+
+发一张食物照片（或图片路径）并说「记一下饮食 / 帮我估热量」即触发 `diet-tracker` 技能：
+
+1. `vision_diet_analyze` 让 `glm-4v-flash` 只识别「食物 + 克重」，返回 JSON；
+2. 热量由本地 `data/food_calories.json` 计算（视觉模型不算热量）；字典没收录的食物会标注「未计入」，可自行往 JSON 里补充；
+3. 以「YYYY-MM-DD 餐次：食物 + 克数 + 大卡」的自包含句写入事实记忆（已绑定助理时自动落到该助理的 `assistant_fact`）。
+
+### 定时提醒（生理期 / 日程）
+
+单线程、仅标准库，不依赖 Redis / Celery：
+
+```bash
+python runtime/scheduler.py            # 常驻，默认每小时
+python runtime/scheduler.py --once     # 立刻检查一次（验收用）
+```
+
+事件写在 `runtime/data/assistants.db` 的 `events` 表：
+
+```sql
+INSERT INTO events(assistant_id, event_type, event_date, remind_days_before, message)
+VALUES('fitness_coach', 'period', '2026-11-07', 3, '预计生理期');
+```
+
+- 触发条件：`0 <= event_date - 今天 <= remind_days_before`，且当天未提醒过；成功后写 `last_reminded_on`，失败下一轮重试。
+- 提醒以 `session_id=reminder-<assistant_id>` 调 `POST /api/chat`，因此会带该助理的人设与私有记忆；同时追加到 `runtime/data/notifications.jsonl`。
+- 需要额外推送时设置环境变量 `REMINDER_WEBHOOK_URL`（飞书/企业微信机器人 Webhook，文本消息格式）。
+- 调度器依赖服务在跑；服务停机期间到期的事件会在下一次成功轮询时补发。
 
 ## 沙箱配置（可选，但文档/代码能力依赖它）
 
@@ -174,6 +228,8 @@ cd runtime/templates/docgen && docker build -t docgen-base:2 .
 | `→ sbx_tools` | 沙箱地址、镜像、超时、常驻策略 |
 | `→ locale.english` | 回复语言（也可在控制台切换） |
 | `config/SOUL.md` | 人格、记忆分类规则、禁止播报运行状态 |
+| `config/personas/<id>.md` | 各助理人设（`/assistant` 绑定时注入） |
+| `data/food_calories.json` | 食物热量字典（每 100g）与别名表 |
 | `plugins/pref_guard/` | 偏好确定性写入 hot 记忆（可在设置里开关 / dry-run） |
 | `plugins/vision_bridge/` | 视觉模型端点、模型名、密钥 |
 
@@ -186,6 +242,9 @@ cd runtime/templates/docgen && docker build -t docgen-base:2 .
 3. 问「帮我生成一份 Excel」：沙箱创建 → 生成 → 下载 → Artifact 面板可见成品。
 4. 问「帮我跑一段 Python」：工具调用应全部是 `sbx_*`。
 5. 发「以后文档都用 B5 纸张」：无需模型记忆也能在下一轮生效（热记忆注入）。
+6. `/assistant fitness_coach` 后说「我以后每天要吃 200g 鸡胸肉」，再开新会话 `/assistant work_secretary` 问「我每天要吃什么？」——应回答没有饮食记录。
+7. 发一张两个苹果的图片并说「记饮食」——应返回约 104 大卡，并写入当天饮食记录。
+8. 插入一条 3 天后的事件，运行 `python runtime/scheduler.py --once`——应输出 `sent event=…` 并生成 `runtime/data/notifications.jsonl`。
 
 ## 常见问题
 
@@ -206,4 +265,4 @@ cd runtime/templates/docgen && docker build -t docgen-base:2 .
 
 ## 版本
 
-版本与变更记录见 [docs/version-log.md](docs/version-log.md)，当前开发版本 `v0.0.1`。
+版本与变更记录见 [docs/version-log.md](docs/version-log.md)，当前开发版本 `v0.0.2`。

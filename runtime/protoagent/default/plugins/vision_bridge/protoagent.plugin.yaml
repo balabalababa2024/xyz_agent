@@ -1,11 +1,11 @@
 id: vision_bridge
-name: Vision Bridge (拍照问答)
-version: 0.0.0
+name: Vision Bridge (拍照问答 / 饮食热量)
+version: 0.0.2
 description: >-
-  Stage-5 multimodal bridge. vision_analyze routes a host image / URL to an
-  OpenAI-compatible vision endpoint (default Zhipu GLM-4V) and returns text, so
-  text-only skills (拍照问答 / 简历分析 / 代码审查) can consume picture content
-  without native multimodal input in the chat model.
+  vision_analyze routes a host image / URL to an OpenAI-compatible vision
+  endpoint (default Zhipu GLM-4V) and returns text. vision_diet_analyze only
+  asks the model for food names + estimated grams, then computes calories locally
+  from data/food_calories.json (the model never does arithmetic).
 enabled: true
 config_section: vision_bridge
 config:

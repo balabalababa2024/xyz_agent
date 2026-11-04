@@ -3,7 +3,7 @@
 - 项目：xyz_agent（基于 protoAgent 本地实例）
 - 运行时底座：`protolabs-agent 0.219.0`（`C:\Users\wyr20\.local\bin\protoagent.exe`）
 - 盒子根：`D:\Miaooaimzzz\xyz_agent\runtime\protoagent`，实例 `default`
-- 版本口径：**当前开发版本为 `v0.0.1`**（包含阶段一~五、P0 优化与记忆分类/偏好守卫）；`v0.0.0` 保留为阶段一~二的历史基线。版本号只在发布节点上打 tag，未发布前改动累加到当前开发版本。
+- 版本口径：**当前开发版本为 `v0.0.2`**（在 `v0.0.1` 基础上新增多助理隔离、拍照饮食热量、轻量定时提醒）；`v0.0.0` 保留为阶段一~二的历史基线。版本号只在发布节点上打 tag，未发布前改动累加到当前开发版本。
 - 仓库整理（2026-11-03）：为让拉取者可直接运行，历史验证脚本与取证文件（`stage*-artifacts`、`verify-*.py`、探针/日志等）已移除；本文保留当时的结论与实测数据，相关路径仅作历史引用。
 
 ---
@@ -12,10 +12,11 @@
 
 | 版本 | 日期 | 内容 | 状态 |
 |---|---|---|---|
-| **v0.0.1** | 2026-11-03 | 阶段三~五完成；P0 优化（模板化生成 / 沙箱常驻 / 成品预览 / 流式）；记忆分类（方案 A）+ 确定性偏好守卫 `pref_guard`（方案 B） | 开发中（待建仓库，未发布） |
+| **v0.0.2** | 2026-11-04 | 多助理人设与记忆隔离（`assistant` 插件 + `pref_guard` 按助理作用域）；`vision_diet_analyze` 拍照识别 + 本地字典算热量（`diet-tracker` 技能）；`runtime/scheduler.py` 单线程提醒调度器 | 开发中（待建仓库，未发布） |
+| v0.0.1 | 2026-11-03 | 阶段三~五完成；P0 优化（模板化生成 / 沙箱常驻 / 成品预览 / 流式）；记忆分类（方案 A）+ 确定性偏好守卫 `pref_guard`（方案 B） | 已并入 v0.0.2 |
 | v0.0.0 | 2026-10-28 起 | 历史基线：阶段一（底座与验证）、阶段二（沙箱工具层） | 已并入 v0.0.1 |
 
-> `v0.0.0` 记录保留用于追溯；当前开发版本以 `v0.0.1` 为准。首个可发布节点确认后再定 `v0.1.0` 的归属。
+> `v0.0.0` 记录保留用于追溯；当前开发版本以 `v0.0.2` 为准。首个可发布节点确认后再定 `v0.1.0` 的归属。
 
 ### v0.0.0 → v0.0.1 — 累计变更明细（未发布）
 
@@ -117,6 +118,59 @@
 3. `max_iterations` 2000 → **100**（约 25 次工具调用；实测设 30 会撞 `GraphRecursionError`），并设 `turn_stall_timeout_seconds: 240` 兜底无输出卡死。
 
 实测：同一 Excel 请求由 **3.5 min → 32.2s**，`out/scores.xlsx` 5,038 字节，PASS。离线熔断测试：关闭端口连续失败 3 次后，第 4 次调用 **0s** 返回 `circuit breaker open for 60s`。
+
+---
+
+## 一·续 — v0.0.2 多助理 / 拍照饮食 / 定时提醒（2026-11-04）
+
+### 1. 阶段一：多助理（Persona）与记忆隔离
+
+**设计取舍**：2C2G 下不引入 Redis / 中间件，也不用 protoAgent 原生 Fleet（每个助理独立进程），改为**单进程插件级逻辑隔离**：
+
+- 绑定关系与事件放插件自有库 `runtime/data/assistants.db`（`assistants` / `session_bindings` / `events`），**不改核心表**。
+- 私有记忆复用 knowledge store 既有的 `namespace` 列，统一写 `delivery_policy="on_demand"`，因此不会进入全局 hot（`delivery_policy=always`）与自动 RAG。
+- 每轮由中间件手工把「当前助理」的 persona 与私有记忆拼进 system prompt；未绑定会话完全走原逻辑。
+
+**改动**
+
+- 新增插件 `runtime/protoagent/default/plugins/assistant/`（manifest `version: 0.0.2`，`config_section: assistant`）：
+  - 聊天命令 `/assistant`（仅用户可用，模型不可调用）：列表 / `<id>` 绑定 / `new <id> [名称]` 新建人设 / `off` 解除；id 白名单 `[A-Za-z0-9_-]`，且必须存在 `config/personas/<id>.md`。
+  - 中间件 `AssistantMiddleware`：`wrap_model_call` 追加 `## 当前助理（多助理模式）` + persona + `## 当前助理的私有记忆`（`list_chunks(namespace=assistant_id)`，上限 20 条 / 3000 字符，跳过 `delivery_policy="always"`）。
+  - `wrap_tool_call` 拦截已绑定会话的 `memory_ingest`：`hot/preferences → assistant_hot`、`fact → assistant_fact`，并补 `namespace=assistant_id`、`delivery_policy="on_demand"`，直接返回 `ToolMessage`（不再由核心写全局 hot）。
+- 改造 `plugins/pref_guard`：读取 `session_bindings`，已绑定 → `assistant_hot / on_demand / namespace`；未绑定 → 原 `hot / always`（**向后兼容，未绑定会话行为不变**）。
+- 人设文件：`config/personas/fitness_coach.md`（健身教练「阿力」）、`work_secretary.md`（工作秘书「小序」）。
+
+### 2. 阶段二：多模态饮食记录（拍照识卡路里）
+
+- 新增工具 `vision_diet_analyze(image, meal="")`（同属 `vision_bridge` 插件，manifest 升 `0.0.2`）：
+  - 视觉模型（`glm-4v-flash`）Prompt 只要求识别食物与克重，返回 `[{"food":"米饭","weight_g":150}]`；
+  - **热量一律在本地算**：`data/food_calories.json`（约 55 种常见食物 + 别名表，如 `鸡胸→鸡胸肉`、`红富士→苹果`），`_match_food` 依次做精确/别名/最长子串匹配；未命中记为 `unknown_foods` 且**不计入总量**；
+  - 返回 `{"date","meal","items":[{food,weight_g,kcal_per_100g,kcal}],"total_kcal","unknown_foods","source"}`。
+- 新增技能 `skills/diet-tracker/SKILL.md`：图片 → `vision_diet_analyze` → 用返回的 `date/total_kcal` 拼自包含句 → `memory_ingest(domain="fact", heading="饮食记录", memory_kind="fact")`（已绑定助理时由系统自动落 `assistant_fact`）→ 回复合计与明细；明确禁止让视觉模型算热量、禁止为此调用 `sbx_*`。
+
+### 3. 阶段三：轻量定时提醒（`runtime/scheduler.py`）
+
+- 单线程、仅标准库（`sqlite3 / urllib / argparse`），无 APScheduler / Celery / Redis / 线程池；默认每小时轮询，`--interval` 可调。
+- 到期判定：`0 <= (event_date - 今天) <= remind_days_before` 且 `last_reminded_on != 今天`；**POST `/api/chat` 成功后才写 `last_reminded_on`**，失败下一轮重试，不重复轰炸。
+- 提醒会话自动绑定事件所属助理（`session_id=reminder-<assistant_id>`），因此提醒按该助理的人设与私有记忆生成。
+- 每次提醒追加 `runtime/data/notifications.jsonl`；可选 `REMINDER_WEBHOOK_URL`（飞书/企业微信机器人）二次推送。
+- 参数：`--once`（验收单跑）、`--interval`、`--base-url`、`--db`、`--timeout`。
+
+### 4. 验收（真实模型实测，2026-11-04）
+
+| 验收项 | 实测结果 |
+|---|---|
+| ① 助理偏好隔离 | `qa-asst-1` → `/assistant fitness_coach` → 「我以后每天要吃 200g 鸡胸肉。」→ 落库 `(domain=assistant_hot, memory_kind=profile, delivery_policy=on_demand, namespace=fitness_coach)`；全局 `always` 仍为 3 条。新会话 `qa-asst-2` 绑定 `work_secretary` 问「我每天要吃什么？」→ 回答“我这边没有任何关于你饮食的记录”。新会话 `qa-asst-3` 绑定 `fitness_coach` 同问 → 准确答出“每天 200g 鸡胸肉”。**PASS** |
+| ② 拍照热量 | `qa-asst-3` 发两张苹果的图片 → 模型自主调 `vision_diet_analyze` → 视觉识别 2 份各 100g 苹果 → 本地字典 52 kcal/100g → **104 大卡**；写入 `(assistant_fact, namespace=fitness_coach)`「2026-11-04 午餐：苹果 2 个，共约 200g…合计约 104 大卡」。**PASS** |
+| ③ 定时提醒 | `events` 插入 `2026-11-07` 生理期（`remind_days_before=3`）→ `python runtime/scheduler.py --once` → `sent event=1 days_left=3` → `last_reminded_on=2026-11-04`、`notifications.jsonl` 落盘，回复按健身教练人设并引用“200g 鸡胸肉”私有记忆。**PASS** |
+
+**实测修正**：`/api/chat` 的回复字段是 `response`，首版调度器按 `reply` 取值导致落盘 `reply=""`；已改为 `response → reply → output → raw` 逐级回退并复跑取证。
+
+**重启核对**：插件 13 个（新增 `assistant`）、技能 26 个（新增 `diet-tracker`）、`/api/tools` 含 `vision_analyze` 与 `vision_diet_analyze`、boot `graph_compile=34.06s`。
+
+**清理与仓库**：测试会话绑定、测试记忆（`namespace=fitness_coach`）、测试事件与 `notifications.jsonl` 已删除，全局仅保留 3 条真实 hot；`.gitignore` 新增 `runtime/data/*.db*` 与 `runtime/data/notifications.jsonl`（`data/food_calories.json` 属源码，保留入库）。
+
+**边界**：人设注入与私有记忆是“可见性隔离”，不是权限沙箱——模型仍能读取全局 hot（3 条真实偏好）与公共知识；视觉克重为估算（误差约 ±20%）；调度器依赖服务在跑，服务停机期间到期事件在下一次成功轮询时补发。
 
 ---
 
@@ -287,13 +341,16 @@ vision_analyze(image, question?, model?)
 | P8 | 方案 A 的模型概率性漏写/改写偏好 | 已完成（方案 B：`pref_guard` 本地规则写入，实测写入/去重/排除一次性与问句均通过） | 插件 middleware 扫描真实用户消息（跳过 `protoagent_injected_context` frame），写 hot/always；控制台可开关/演练 |
 | P3 | 控制台贴图提示“打不开图片”（聊天附件只给 media id，`vision_analyze` 只认路径/URL） | 已修复并复测 | `vision_bridge` 支持 media id 解析；取证 `stage4-artifacts/07-user-image-session.json`（修复前）、`08-mediaid-e2e.json`（修复后 PASS） |
 | P4 | 回复语言改为前端可选（中文/英文） | 已落地并复测 | 插件 `locale` 的 `english` 开关（设置 ▸ Plugins ▸ Locale），middleware 每轮注入；热切换 `restart_required: []`，取证 `09-locale-toggle.json` |
+| P9 | 多助理（Persona）与记忆隔离（v0.0.2 阶段一） | 已完成（`/assistant` 切换、私有记忆隔离、人设注入、写入接管均实测 PASS） | `assistant` 插件 + `pref_guard` 作用域改造；绑定/事件库 `runtime/data/assistants.db`（不入库） |
+| P10 | 多模态饮食记录（v0.0.2 阶段二） | 已完成（两张苹果图 → 视觉识别 → 本地字典 104 大卡 → `assistant_fact`） | `vision_diet_analyze` + `data/food_calories.json` + `skills/diet-tracker` |
+| P11 | 主动定时提醒（v0.0.2 阶段三） | 已完成（3 天后事件单跑触发、`last_reminded_on` 落库、按人设回复） | `runtime/scheduler.py` 单线程轮询；常驻命令 `python runtime/scheduler.py` |
 
 
 ---
 
 ## 四、变更记录规范
 
-1. **当前开发版本为 `v0.0.1`**：未打 tag 前的改动累加到该版本，按阶段/里程碑分段记录；`v0.0.0` 仅保留阶段一~二的历史内容，不再新增条目。
+1. **当前开发版本为 `v0.0.2`**：未打 tag 前的改动累加到该版本，按阶段/里程碑分段记录；`v0.0.1` 及更早条目仅保留历史内容，不再新增。
 2. 每次发布追加一节「改动 / 产物 / 验证 / 遗留」，只写**实测通过**的能力；未实测的能力标 `待测`，不得写成已完成。
 3. 涉及工具的改动必须附 `/api/tools` 取证 JSON（`docs/stage1-artifacts/`）。
 4. 涉及 SDK 的改动必须附 `inspect.signature` 实测输出，禁止按记忆猜 API。

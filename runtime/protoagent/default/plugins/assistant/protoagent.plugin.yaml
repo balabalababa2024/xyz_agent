@@ -1,0 +1,26 @@
+id: assistant
+name: Multi-Assistant Router (多助理 / 人设 / 记忆隔离)
+version: 0.0.2
+description: >-
+  User-only /assistant chat command binds a session to a persona file under
+  config/personas/. A middleware appends that persona to the system prompt and
+  re-injects only this assistant's private memories (namespace scoped, on-demand
+  delivery). memory_ingest calls made inside a bound session are rewritten to the
+  assistant namespace and kept out of global hot/RAG injection, so two assistants
+  never see each other's notes. Legacy behaviour is unchanged for unbound sessions.
+enabled: true
+config_section: assistant
+config:
+  enabled: true
+  inject_limit: 20
+  max_inject_chars: 3000
+  persona_dir: ""
+secrets: []
+settings:
+  - { key: enabled, label: "启用多助理路由（Enable multi-assistant routing）", type: bool }
+  - { key: inject_limit, label: "每次注入的私有记忆条数（Private memory entries per turn）", type: number }
+  - { key: max_inject_chars, label: "私有记忆注入字符上限（Max chars）", type: number }
+  - { key: persona_dir, label: "人设目录（空 = <box>/default/config/personas）", type: string }
+capabilities:
+  network: []
+  filesystem: read-write

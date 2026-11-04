@@ -24,7 +24,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import re
+import sqlite3
+from pathlib import Path
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
@@ -145,14 +148,60 @@ def _store():
     return getattr(STATE, "knowledge_store", None)
 
 
-def _already_stored(store, content: str) -> bool:
+def _assistant_db() -> Path:
+    root = os.environ.get("PROTOAGENT_BOX_ROOT")
+    repo = Path(root).parent.parent if root else Path(__file__).resolve().parents[5]
+    return repo / "runtime" / "data" / "assistants.db"
+
+
+def _session_of(request) -> str:
+    state = getattr(request, "state", None)
+    if isinstance(state, dict):
+        return str(state.get("session_id") or "").strip()
+    return str(getattr(state, "session_id", "") or "").strip()
+
+
+def _bound_assistant(session_id: str) -> str:
+    """Current assistant for this session ('' = unbound / legacy global mode)."""
+    if not session_id:
+        return ""
+    path = _assistant_db()
+    if not path.is_file():
+        return ""
+    try:
+        con = sqlite3.connect(path, timeout=5)
+        try:
+            row = con.execute(
+                "SELECT assistant_id FROM session_bindings WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        finally:
+            con.close()
+        return str(row[0]) if row else ""
+    except Exception:  # noqa: BLE001 - routing must not break preference capture
+        log.debug("[pref_guard] assistant lookup failed", exc_info=True)
+        return ""
+
+
+def _scope(assistant_id: str) -> tuple[str, str, str | None]:
+    """(domain, delivery_policy, namespace) for the current routing mode."""
+    if assistant_id:
+        return "assistant_hot", "on_demand", assistant_id
+    return "hot", "always", None
+
+
+def _already_stored(store, content: str, assistant_id: str = "") -> bool:
     if not bool(CFG.get("dedupe", True)):
         return False
     target = _norm(content)
     if len(target) < 4:
         return False
+    domain, _, namespace = _scope(assistant_id)
     try:
-        rows = store.list_chunks(domain="hot", limit=100)
+        if namespace:
+            rows = store.list_chunks(domain=domain, namespace=namespace, limit=100)
+        else:
+            rows = store.list_chunks(domain=domain, limit=100)
     except TypeError:  # backend without the domain filter
         rows = store.list_chunks(limit=100)
     except Exception:  # noqa: BLE001 - a lookup failure must not drop the write
@@ -168,14 +217,16 @@ def _already_stored(store, content: str) -> bool:
     return False
 
 
-def _write(store, content: str) -> int | None:
+def _write(store, content: str, assistant_id: str = "") -> int | None:
     subject = "pref-" + hashlib.sha1(_norm(content).encode()).hexdigest()[:10]
+    domain, policy, namespace = _scope(assistant_id)
     return store.add_chunk(
         content,
-        domain="hot",
+        domain=domain,
         heading="用户偏好",
         memory_kind="profile",
-        delivery_policy="always",
+        delivery_policy=policy,
+        namespace=namespace,
         subject=subject,
         source="pref_guard",
         source_type="conversation",
@@ -197,14 +248,23 @@ def _scan(request) -> None:
     if store is None:
         log.debug("[pref_guard] knowledge store unavailable, skip")
         return
-    if _already_stored(store, content):
+    assistant_id = _bound_assistant(_session_of(request))
+    if _already_stored(store, content, assistant_id):
         log.debug("[pref_guard] duplicate preference skipped")
         return
     if bool(CFG.get("dry_run", False)):
         log.info("[pref_guard] DRY-RUN would store: %s", content[:80])
         return
-    chunk_id = _write(store, content)
-    log.info("[pref_guard] stored preference hot/always id=%s chars=%d", chunk_id, len(content))
+    chunk_id = _write(store, content, assistant_id)
+    if assistant_id:
+        log.info(
+            "[pref_guard] stored preference assistant=%s domain=assistant_hot id=%s chars=%d",
+            assistant_id,
+            chunk_id,
+            len(content),
+        )
+    else:
+        log.info("[pref_guard] stored preference hot/always id=%s chars=%d", chunk_id, len(content))
 
 
 class PrefGuardMiddleware(AgentMiddleware):
@@ -222,12 +282,21 @@ class PrefGuardMiddleware(AgentMiddleware):
             if bool(CFG.get("enabled", True)):
                 content = _classify(_latest_user_text(request))
                 store = _store() if content else None
-                if content and store is not None and not _already_stored(store, content):
+                assistant_id = _bound_assistant(_session_of(request)) if content else ""
+                if content and store is not None and not _already_stored(store, content, assistant_id):
                     if bool(CFG.get("dry_run", False)):
                         log.info("[pref_guard] DRY-RUN would store: %s", content[:80])
                     else:
-                        chunk_id = await asyncio.to_thread(_write, store, content)
-                        log.info("[pref_guard] stored preference hot/always id=%s chars=%d", chunk_id, len(content))
+                        chunk_id = await asyncio.to_thread(_write, store, content, assistant_id)
+                        if assistant_id:
+                            log.info(
+                                "[pref_guard] stored preference assistant=%s domain=assistant_hot id=%s chars=%d",
+                                assistant_id,
+                                chunk_id,
+                                len(content),
+                            )
+                        else:
+                            log.info("[pref_guard] stored preference hot/always id=%s chars=%d", chunk_id, len(content))
         except Exception:  # noqa: BLE001
             log.warning("[pref_guard] scan failed", exc_info=True)
         return await handler(request)
